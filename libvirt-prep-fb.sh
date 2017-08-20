@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#
+# Prepare libvirt for new VMs
+#
+# Filename: libvirt-prep-fb.sh
+#
+# Variables: $secondDrive
+#
+source ./custom-variables-fb.var
+
+
+# List of VM hosts to prep for
+VMhosts="server1 tester1 outsider1 clone1"
+
+
+# Clone the "default" network and rename to "outsider"
+cp /etc/libvirt/qemu/networks/default.xml /etc/libvirt/qemu/networks/outsider.xml
+
+
+# Modify the outsider.xml file 
+sed -i '/<host/d' /etc/libvirt/qemu/networks/outsider.xml
+sed -i 's/<name>.*</<name>outsider</g' /etc/libvirt/qemu/networks/outsider.xml
+sed -i '/<uuid>.*<\/uuid>/d' /etc/libvirt/qemu/networks/outsider.xml
+sed -i "s/<bridge name='[^']*'/<bridge name='virbr1'/g" /etc/libvirt/qemu/networks/outsider.xml
+sed -i '/<mac.*\/>/d' /etc/libvirt/qemu/networks/outsider.xml
+sed -i "s/<ip address='[^']*' netmask='[^']*'>/<ip address='192.168.100.1' netmask='255.255.255.0'>/g" /etc/libvirt/qemu/networks/outsider.xml
+sed -i "s/<range start='[^']*' end='[^']*'/<range start='192.168.100.128' end='192.168.100.254'/g" /etc/libvirt/qemu/networks/outsider.xml
+
+
+# Persistently add Outsider network to libvirt
+virsh net-define /etc/libvirt/qemu/networks/outsider.xml
+
+
+# Start and automatically boot up Outsider network
+virsh net-autostart outsider
+virsh net-start outsider
+
+
+# Add DHCP clients for Default network:
+virsh net-update default add ip-dhcp-host "<host mac='00:11:22:33:44:01' name='server1' ip='192.168.122.50' />" --config --live
+virsh net-update default add ip-dhcp-host "<host mac='00:11:22:33:44:11' name='tester1' ip='192.168.122.150' />" --config --live
+
+
+# Add the DHCP clients for Outsider network:
+virsh net-update outsider add ip-dhcp-host "<host mac='00:11:22:33:44:21' name='outsider1' ip='192.168.100.100' />" --config --live
+virsh net-update outsider add ip-dhcp-host "<host mac='00:11:22:33:44:31' name='clone1' ip='192.168.100.50' />" --config --live
+
+
+# Format the 4 partitions on second drive for the VMs:
+sgdisk -Z $secondDrive
+sgdisk -n 1:0:+18G -t 1:8e00 -c 1:"server1 LVM" $secondDrive
+sgdisk -n 2:0:+18G -t 2:8e00 -c 2:"tester1 LVM" $secondDrive
+sgdisk -n 3:0:+18G -t 3:8e00 -c 3:"outsider1 LVM" $secondDrive
+sgdisk -n 4:0:+18G -t 4:8e00 -c 4:"clone1 LVM" $secondDrive
+partprobe $secondDrive
+
+
+# Set up physical volumes on all partitions:
+for num in {1..4}
+do
+	pvcreate "$secondDrive"$num
+done
+
+
+# Define libvirt storage pool:
+virsh pool-define-as server1 logical - - "$secondDrive"1 server1
+virsh pool-define-as tester1 logical - - "$secondDrive"2 tester1
+virsh pool-define-as outsider1 logical - - "$secondDrive"3 outsider1
+virsh pool-define-as clone1 logical - - "$secondDrive"4 clone1
+
+
+# Build the defined storage pool:
+for server in $VMhosts
+do
+	virsh pool-build $server
+done
+
+
+# Autostart the storage pool:
+for server in $VMhosts
+do
+	virsh pool-autostart $server
+done
+
+
+# Start the storage pool:
+for server in $VMhosts
+do
+	virsh pool-start $server
+done
+
+
+# Create logical volumes for each pool:
+for server in $VMhosts
+do
+	virsh vol-create-as $server hdd1 16G
+	virsh vol-create-as $server hdd2 1G
+	virsh vol-create-as $server hdd3 1020M
+done
+
